@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+FILE=${FILE:-""}
+COMPOSE_FILE=docker-compose${FILE}.yml
+docker-compose -f $COMPOSE_FILE up -d --build --remove-orphans
