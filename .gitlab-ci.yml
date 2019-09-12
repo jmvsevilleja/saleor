@@ -10,6 +10,7 @@ stages:
   - deploy
 
 variables:
+  CI_BUILD_REF_NAME: master
   CONTAINER_IMAGE: registry.example.com:4567/jsevilleja/saleor
   CONTAINER_TEST_IMAGE: $CONTAINER_IMAGE:$CI_BUILD_REF_NAME
   DEPLOY_SERVER_URL: myserver.example.com
@@ -28,7 +29,8 @@ build:
     - docker build -t $CONTAINER_TEST_IMAGE .
     - docker push $CONTAINER_TEST_IMAGE
 
-codequality:
+
+.codequality:
   stage: test
   tags:
     - shell
@@ -38,7 +40,7 @@ codequality:
   artifacts:
     paths: [codeclimate.json]
 
-test:
+.test:
   stage: test
   tags:
     - shell
@@ -49,7 +51,7 @@ test:
     - docker-compose version
   script:
     - docker pull $CONTAINER_TEST_IMAGE
-    - docker-compose -p ci up --abort-on-container-exit
+    - docker-compose -f docker-compose.test.yml -p ci up --abort-on-container-exit
   coverage: '/TOTAL.*?(\d{1,2}.\d+%)/'
 
 release_stg:
@@ -63,6 +65,7 @@ release_stg:
     - docker push $CONTAINER_IMAGE:staging
 
 deploy_stg:
+  image: dtzar/helm-kubectl
   stage: deploy
   tags:
     - docker
@@ -72,12 +75,11 @@ deploy_stg:
     name: staging
     url: https://staging.example.com
   before_script:
-    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
-    - eval $(ssh-agent -s)
-    - echo "$DEPLOY_KEY" | ssh-add -
-    - mkdir -p ~/.ssh
-    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
-  script:
-    - scp docker-compose.staging.yml deploy@$DEPLOY_SERVER_URL:$DEPLOY_PATH/staging/docker-compose.yml
-    - ssh deploy@$DEPLOY_SERVER_URL "cd $DEPLOY_PATH/staging && docker stack deploy -c docker-compose.yml --with-registry-auth saleor_staging"
+    - kubectl version
+    - kubectl cluster-info
 
+  script:
+    - kubectl apply -f ./deploy/postgres/
+    - kubectl apply -f ./deploy/redis/
+    - kubectl apply -f ./deploy/django/
+    - kubectl apply -f ./deploy/celery/
