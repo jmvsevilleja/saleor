@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: celery-worker
-          image: 0.0.0.0:5000/jsevilleja/saleor:staging
+          image: 192.168.1.3:5000/jsevilleja/saleor:staging
           command: ['celery', '-A', 'kube_django', 'worker', '-l', 'info']
           env:
             - name: POSTGRES_USER
