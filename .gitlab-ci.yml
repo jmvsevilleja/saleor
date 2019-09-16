@@ -65,7 +65,6 @@ release_stg:
     - docker push $CONTAINER_IMAGE:staging
 
 deploy_stg:
-  image: dtzar/helm-kubectl
   stage: deploy
   tags:
     - docker
@@ -79,7 +78,7 @@ deploy_stg:
     - kubectl cluster-info
 
   script:
-    - kubectl apply -f ./deploy/postgres/
-    - kubectl apply -f ./deploy/redis/
-    - kubectl apply -f ./deploy/django/
-    - kubectl apply -f ./deploy/celery/
+    - kubectl apply -f deploy/postgres/ --namespace=staging
+    - kubectl apply -f deploy/redis/ --namespace=staging
+    - kubectl apply -f deploy/django/ --namespace=staging
+    - kubectl apply -f deploy/celery/ --namespace=staging
