@@ -10,6 +10,7 @@
 !.gqlconfig
 !.github
 !.gitignore
+!.gitlab-ci.yml
 !.nvmrc
 !.npmrc
 !.plop
