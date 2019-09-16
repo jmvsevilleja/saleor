@@ -7,7 +7,7 @@ spec:
     spec:
       containers:
         - name: django
-          image: dockerbogo/django_minikube:3.0.6
+          image: 0.0.0.0:5000/jsevilleja/saleor:staging
           command: ['python', 'manage.py', 'migrate']
           env:
             - name: POSTGRES_USER
