@@ -1,5 +1,4 @@
 import graphene
-import graphene_django_optimizer as gql_optimizer
 from django_countries.fields import Country
 from graphene import relay
 
@@ -59,9 +58,9 @@ class PaymentSource(graphene.ObjectType):
             "for user in payment gateway, such as credit card."
         )
 
-    gateway = graphene.String(description="Payment gateway name", required=True)
+    gateway = graphene.String(description="Payment gateway name.", required=True)
     credit_card_info = graphene.Field(
-        CreditCard, description="Stored credit card details if available"
+        CreditCard, description="Stored credit card details if available."
     )
 
 
@@ -71,8 +70,9 @@ class Payment(CountableDjangoObjectType):
     )
     actions = graphene.List(
         OrderAction,
-        description="""List of actions that can be performed in
-        the current state of a payment.""",
+        description=(
+            "List of actions that can be performed in the current state of a payment."
+        ),
         required=True,
     )
     total = graphene.Field(Money, description="Total amount of the payment.")
@@ -113,7 +113,6 @@ class Payment(CountableDjangoObjectType):
         ]
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="transactions")
     def resolve_actions(root: models.Payment, _info):
         actions = []
         if root.can_capture():
@@ -148,7 +147,6 @@ class Payment(CountableDjangoObjectType):
         )
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="transactions")
     def resolve_transactions(root: models.Payment, _info):
         return root.transactions.all()
 
@@ -160,7 +158,6 @@ class Payment(CountableDjangoObjectType):
         return root.get_captured_amount()
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="transactions")
     def resolve_available_capture_amount(root: models.Payment, _info):
         # FIXME TESTME
         if not root.can_capture():

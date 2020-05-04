@@ -1,30 +1,20 @@
 import graphene
-import graphene_django_optimizer as gql_optimizer
-from django.db.models import Prefetch
 from graphene import relay
 
 from ...menu import models
 from ..core.connection import CountableDjangoObjectType
-from ..translations.enums import LanguageCodeEnum
-from ..translations.resolvers import resolve_translation
+from ..translations.fields import TranslationField
 from ..translations.types import MenuItemTranslation
 
 
-def prefetch_menus(info, *_args, **_kwargs):
-    qs = models.MenuItem.objects.filter(level=0)
-    return Prefetch(
-        "items", queryset=gql_optimizer.query(qs, info), to_attr="prefetched_items"
-    )
-
-
 class Menu(CountableDjangoObjectType):
-    items = gql_optimizer.field(
-        graphene.List(lambda: MenuItem), prefetch_related=prefetch_menus
-    )
+    items = graphene.List(lambda: MenuItem)
 
     class Meta:
-        description = """Represents a single menu - an object that is used
-               to help navigate through the store."""
+        description = (
+            "Represents a single menu - an object that is used to help navigate "
+            "through the store."
+        )
         interfaces = [relay.Node]
         only_fields = ["id", "name"]
         model = models.Menu
@@ -32,31 +22,20 @@ class Menu(CountableDjangoObjectType):
     @staticmethod
     def resolve_items(root: models.Menu, _info, **_kwargs):
         if hasattr(root, "prefetched_items"):
-            return root.prefetched_items
+            return root.prefetched_items  # type: ignore
         return root.items.filter(level=0)
 
 
 class MenuItem(CountableDjangoObjectType):
-    children = gql_optimizer.field(
-        graphene.List(lambda: MenuItem), model_field="children"
-    )
+    children = graphene.List(lambda: MenuItem)
     url = graphene.String(description="URL to the menu item.")
-    translation = graphene.Field(
-        MenuItemTranslation,
-        language_code=graphene.Argument(
-            LanguageCodeEnum,
-            description="A language code to return the translation for.",
-            required=True,
-        ),
-        description=(
-            "Returns translated Menu item fields " "for the given language code."
-        ),
-        resolver=resolve_translation,
-    )
+    translation = TranslationField(MenuItemTranslation, type_name="menu item")
 
     class Meta:
-        description = """Represents a single item of the related menu.
-        Can store categories, collection or pages."""
+        description = (
+            "Represents a single item of the related menu. Can store categories, "
+            "collection or pages."
+        )
         interfaces = [relay.Node]
         only_fields = [
             "category",
@@ -67,7 +46,6 @@ class MenuItem(CountableDjangoObjectType):
             "name",
             "page",
             "parent",
-            "sort_order",
         ]
         model = models.MenuItem
 

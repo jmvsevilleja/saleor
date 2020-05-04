@@ -1,29 +1,35 @@
 import graphene
-import graphene_django_optimizer as gql_optimizer
 from django.core.exceptions import ValidationError
 from graphene import relay
+from graphql_jwt.exceptions import PermissionDenied
 
-from ...order import models
+from ...core.permissions import AccountPermissions, OrderPermissions
+from ...core.taxes import display_gross_prices
+from ...order import OrderStatus, models
 from ...order.models import FulfillmentStatus
-from ...order.utils import get_valid_shipping_methods_for_order
+from ...order.utils import get_order_country, get_valid_shipping_methods_for_order
+from ...plugins.manager import get_plugins_manager
 from ...product.templatetags.product_images import get_product_image_thumbnail
+from ...warehouse import models as warehouse_models
 from ..account.types import User
 from ..core.connection import CountableDjangoObjectType
 from ..core.types.common import Image
 from ..core.types.money import Money, TaxedMoney
+from ..decorators import permission_required
 from ..giftcard.types import GiftCard
+from ..meta.deprecated.resolvers import resolve_meta, resolve_private_meta
+from ..meta.types import ObjectWithMetadata
 from ..payment.types import OrderAction, Payment, PaymentChargeStatusEnum
 from ..product.types import ProductVariant
 from ..shipping.types import ShippingMethod
+from ..warehouse.types import Warehouse
 from .enums import OrderEventsEmailsEnum, OrderEventsEnum
 from .utils import validate_draft_order
 
 
 class OrderEventOrderLineObject(graphene.ObjectType):
     quantity = graphene.Int(description="The variant quantity.")
-    order_line = gql_optimizer.field(
-        graphene.Field(lambda: OrderLine, description="The order line.")
-    )
+    order_line = graphene.Field(lambda: OrderLine, description="The order line.")
     item_name = graphene.String(description="The variant name.")
 
 
@@ -31,29 +37,28 @@ class OrderEvent(CountableDjangoObjectType):
     date = graphene.types.datetime.DateTime(
         description="Date when event happened at in ISO 8601 format."
     )
-    type = OrderEventsEnum(description="Order event type")
-    user = graphene.Field(
-        User,
-        id=graphene.Argument(graphene.ID),
-        description="User who performed the action.",
-    )
+    type = OrderEventsEnum(description="Order event type.")
+    user = graphene.Field(User, description="User who performed the action.")
     message = graphene.String(description="Content of the event.")
-    email = graphene.String(description="Email of the customer")
+    email = graphene.String(description="Email of the customer.")
     email_type = OrderEventsEmailsEnum(
-        description="Type of an email sent to the customer"
+        description="Type of an email sent to the customer."
     )
     amount = graphene.Float(description="Amount of money.")
-    payment_id = graphene.String(description="The payment ID from the payment gateway")
+    payment_id = graphene.String(description="The payment ID from the payment gateway.")
     payment_gateway = graphene.String(description="The payment gateway of the payment.")
     quantity = graphene.Int(description="Number of items.")
-    composed_id = graphene.String(description="Composed id of the Fulfillment.")
+    composed_id = graphene.String(description="Composed ID of the Fulfillment.")
     order_number = graphene.String(description="User-friendly number of an order.")
     oversold_items = graphene.List(
         graphene.String, description="List of oversold lines names."
     )
     lines = graphene.List(OrderEventOrderLineObject, description="The concerned lines.")
-    fulfilled_items = gql_optimizer.field(
-        graphene.List(lambda: FulfillmentLine, description="The lines fulfilled.")
+    fulfilled_items = graphene.List(
+        lambda: FulfillmentLine, description="The lines fulfilled."
+    )
+    warehouse = graphene.Field(
+        Warehouse, description="The warehouse were items were restocked."
     )
 
     class Meta:
@@ -61,6 +66,17 @@ class OrderEvent(CountableDjangoObjectType):
         model = models.OrderEvent
         interfaces = [relay.Node]
         only_fields = ["id"]
+
+    @staticmethod
+    def resolve_user(root: models.OrderEvent, info):
+        user = info.context.user
+        if (
+            user == root.user
+            or user.has_perm(AccountPermissions.MANAGE_USERS)
+            or user.has_perm(AccountPermissions.MANAGE_STAFF)
+        ):
+            return root.user
+        raise PermissionDenied()
 
     @staticmethod
     def resolve_email(root: models.OrderEvent, _info):
@@ -138,6 +154,11 @@ class OrderEvent(CountableDjangoObjectType):
         lines = root.parameters.get("fulfilled_items", None)
         return models.FulfillmentLine.objects.filter(pk__in=lines)
 
+    @staticmethod
+    def resolve_warehouse(root: models.OrderEvent, _info):
+        warehouse = root.parameters.get("warehouse")
+        return warehouse_models.Warehouse.objects.filter(pk=warehouse).first()
+
 
 class FulfillmentLine(CountableDjangoObjectType):
     order_line = graphene.Field(lambda: OrderLine)
@@ -149,26 +170,29 @@ class FulfillmentLine(CountableDjangoObjectType):
         only_fields = ["id", "quantity"]
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="order_line")
     def resolve_order_line(root: models.FulfillmentLine, _info):
         return root.order_line
 
 
 class Fulfillment(CountableDjangoObjectType):
-    lines = gql_optimizer.field(
-        graphene.List(FulfillmentLine, description="List of lines for the fulfillment"),
-        model_field="lines",
+    lines = graphene.List(
+        FulfillmentLine, description="List of lines for the fulfillment."
     )
     status_display = graphene.String(description="User-friendly fulfillment status.")
+    warehouse = graphene.Field(
+        Warehouse,
+        required=False,
+        description=("Warehouse from fulfillment was fulfilled."),
+    )
 
     class Meta:
         description = "Represents order fulfillment."
-        interfaces = [relay.Node]
+        interfaces = [relay.Node, ObjectWithMetadata]
         model = models.Fulfillment
         only_fields = [
             "fulfillment_order",
             "id",
-            "shipping_date",
+            "created",
             "status",
             "tracking_number",
         ]
@@ -181,12 +205,26 @@ class Fulfillment(CountableDjangoObjectType):
     def resolve_status_display(root: models.Fulfillment, _info):
         return root.get_status_display()
 
+    @staticmethod
+    def resolve_warehouse(root: models.Fulfillment, _info):
+        line = root.lines.first()
+        return line.stock.warehouse if line and line.stock else None
+
+    @staticmethod
+    @permission_required(OrderPermissions.MANAGE_ORDERS)
+    def resolve_private_meta(root: models.Fulfillment, _info):
+        return resolve_private_meta(root, _info)
+
+    @staticmethod
+    def resolve_meta(root: models.Fulfillment, _info):
+        return resolve_meta(root, _info)
+
 
 class OrderLine(CountableDjangoObjectType):
     thumbnail = graphene.Field(
         Image,
         description="The main thumbnail for the ordered product.",
-        size=graphene.Argument(graphene.Int, description="Size of thumbnail"),
+        size=graphene.Argument(graphene.Int, description="Size of thumbnail."),
     )
     unit_price = graphene.Field(
         TaxedMoney, description="Price of the single item in the order line."
@@ -194,9 +232,10 @@ class OrderLine(CountableDjangoObjectType):
     variant = graphene.Field(
         ProductVariant,
         required=False,
-        description="""
-            A purchased product variant. Note: this field may be null if the
-            variant has been removed from stock at all.""",
+        description=(
+            "A purchased product variant. Note: this field may be null if the variant "
+            "has been removed from stock at all."
+        ),
     )
     translated_product_name = graphene.String(
         required=True, description="Product name in the customer's language"
@@ -222,18 +261,15 @@ class OrderLine(CountableDjangoObjectType):
         ]
 
     @staticmethod
-    @gql_optimizer.resolver_hints(
-        prefetch_related=["variant__images", "variant__product__images"]
-    )
-    def resolve_thumbnail(root: models.OrderLine, info, *, size=None):
-        if not root.variant_id:
+    def resolve_thumbnail(root: models.OrderLine, info, *, size=255):
+        if not root.variant:
             return None
-        if not size:
-            size = 255
         image = root.variant.get_first_image()
-        url = get_product_image_thumbnail(image, size, method="thumbnail")
-        alt = image.alt if image else None
-        return Image(alt=alt, url=info.context.build_absolute_uri(url))
+        if image:
+            url = get_product_image_thumbnail(image, size, method="thumbnail")
+            alt = image.alt
+            return Image(alt=alt, url=info.context.build_absolute_uri(url))
+        return None
 
     @staticmethod
     def resolve_unit_price(root: models.OrderLine, _info):
@@ -249,22 +285,17 @@ class OrderLine(CountableDjangoObjectType):
 
 
 class Order(CountableDjangoObjectType):
-    fulfillments = gql_optimizer.field(
-        graphene.List(
-            Fulfillment, required=True, description="List of shipments for the order."
-        ),
-        model_field="fulfillments",
+    fulfillments = graphene.List(
+        Fulfillment, required=True, description="List of shipments for the order."
     )
-    lines = gql_optimizer.field(
-        graphene.List(
-            lambda: OrderLine, required=True, description="List of order lines."
-        ),
-        model_field="lines",
+    lines = graphene.List(
+        lambda: OrderLine, required=True, description="List of order lines."
     )
     actions = graphene.List(
         OrderAction,
-        description="""List of actions that can be performed in
-        the current state of an order.""",
+        description=(
+            "List of actions that can be performed in the current state of an order."
+        ),
         required=True,
     )
     available_shipping_methods = graphene.List(
@@ -278,19 +309,13 @@ class Order(CountableDjangoObjectType):
     payment_status_display = graphene.String(
         description="User-friendly payment status."
     )
-    payments = gql_optimizer.field(
-        graphene.List(Payment, description="List of payments for the order"),
-        model_field="payments",
-    )
+    payments = graphene.List(Payment, description="List of payments for the order.")
     total = graphene.Field(TaxedMoney, description="Total amount of the order.")
     shipping_price = graphene.Field(TaxedMoney, description="Total price of shipping.")
     subtotal = graphene.Field(
         TaxedMoney, description="The sum of line prices not including shipping."
     )
-    gift_cards = gql_optimizer.field(
-        graphene.List(GiftCard, description="List of userd gift cards"),
-        model_field="gift_cards",
-    )
+    gift_cards = graphene.List(GiftCard, description="List of user gift cards.")
     status_display = graphene.String(description="User-friendly order status.")
     can_finalize = graphene.Boolean(
         description=(
@@ -303,16 +328,12 @@ class Order(CountableDjangoObjectType):
         Money, description="Amount authorized for the order."
     )
     total_captured = graphene.Field(Money, description="Amount captured by payment.")
-    events = gql_optimizer.field(
-        graphene.List(
-            OrderEvent, description="List of events associated with the order."
-        ),
-        model_field="events",
+    events = graphene.List(
+        OrderEvent, description="List of events associated with the order."
     )
     total_balance = graphene.Field(
         Money,
-        description="""The difference between the paid and the order total
-        amount.""",
+        description="The difference between the paid and the order total amount.",
         required=True,
     )
     user_email = graphene.String(
@@ -321,17 +342,10 @@ class Order(CountableDjangoObjectType):
     is_shipping_required = graphene.Boolean(
         description="Returns True, if order requires shipping.", required=True
     )
-    discount_amount = graphene.Field(
-        Money,
-        deprecation_reason=(
-            "DEPRECATED: Will be removed in Saleor 2.10, use discount instead."
-        ),
-        required=True,
-    )
 
     class Meta:
         description = "Represents an order in the shop."
-        interfaces = [relay.Node]
+        interfaces = [relay.Node, ObjectWithMetadata]
         model = models.Order
         only_fields = [
             "billing_address",
@@ -361,7 +375,6 @@ class Order(CountableDjangoObjectType):
         return root.shipping_price
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="payments__transactions")
     def resolve_actions(root: models.Order, _info):
         actions = []
         payment = root.get_last_payment()
@@ -384,13 +397,11 @@ class Order(CountableDjangoObjectType):
         return root.total
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="payments__transactions")
     def resolve_total_authorized(root: models.Order, _info):
         # FIXME adjust to multiple payments in the future
         return root.total_authorized
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="payments")
     def resolve_total_captured(root: models.Order, _info):
         # FIXME adjust to multiple payments in the future
         return root.total_captured
@@ -413,11 +424,11 @@ class Order(CountableDjangoObjectType):
         return root.lines.all().order_by("pk")
 
     @staticmethod
+    @permission_required(OrderPermissions.MANAGE_ORDERS)
     def resolve_events(root: models.Order, _info):
         return root.events.all().order_by("pk")
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="payments")
     def resolve_is_paid(root: models.Order, _info):
         return root.is_fully_paid()
 
@@ -426,12 +437,10 @@ class Order(CountableDjangoObjectType):
         return str(root.pk)
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="payments")
     def resolve_payment_status(root: models.Order, _info):
         return root.get_payment_status()
 
     @staticmethod
-    @gql_optimizer.resolver_hints(prefetch_related="payments")
     def resolve_payment_status_display(root: models.Order, _info):
         return root.get_payment_status_display()
 
@@ -445,22 +454,43 @@ class Order(CountableDjangoObjectType):
 
     @staticmethod
     def resolve_can_finalize(root: models.Order, _info):
-        try:
-            validate_draft_order(root)
-        except ValidationError:
-            return False
+        if root.status == OrderStatus.DRAFT:
+            country = get_order_country(root)
+            try:
+                validate_draft_order(root, country)
+            except ValidationError:
+                return False
         return True
 
     @staticmethod
-    @gql_optimizer.resolver_hints(select_related="user")
     def resolve_user_email(root: models.Order, _info):
         return root.get_customer_email()
+
+    @staticmethod
+    def resolve_user(root: models.Order, info):
+        user = info.context.user
+        if user == root.user or user.has_perm(AccountPermissions.MANAGE_USERS):
+            return root.user
+        raise PermissionDenied()
 
     @staticmethod
     def resolve_available_shipping_methods(root: models.Order, _info):
         available = get_valid_shipping_methods_for_order(root)
         if available is None:
             return []
+
+        manager = get_plugins_manager()
+        display_gross = display_gross_prices()
+        for shipping_method in available:
+            # Ignore typing check because it is checked in
+            # get_valid_shipping_methods_for_order
+            taxed_price = manager.apply_taxes_to_shipping(
+                shipping_method.price, root.shipping_address  # type: ignore
+            )
+            if display_gross:
+                shipping_method.price = taxed_price.gross
+            else:
+                shipping_method.price = taxed_price.net
         return available
 
     @staticmethod
@@ -472,5 +502,10 @@ class Order(CountableDjangoObjectType):
         return root.gift_cards.all()
 
     @staticmethod
-    def resolve_discount_amount(root: models.Order, _info):
-        return root.discount
+    @permission_required(OrderPermissions.MANAGE_ORDERS)
+    def resolve_private_meta(root: models.Order, _info):
+        return resolve_private_meta(root, _info)
+
+    @staticmethod
+    def resolve_meta(root: models.Order, _info):
+        return resolve_meta(root, _info)

@@ -1,3 +1,5 @@
+from typing import Union
+
 from django.conf import settings
 from django.contrib.auth.models import (
     AbstractBaseUser,
@@ -9,12 +11,12 @@ from django.db import models
 from django.db.models import Q, Value
 from django.forms.models import model_to_dict
 from django.utils import timezone
-from django.utils.translation import pgettext_lazy
 from django_countries.fields import Country, CountryField
 from phonenumber_field.modelfields import PhoneNumber, PhoneNumberField
 from versatileimagefield.fields import VersatileImageField
 
 from ..core.models import ModelWithMetadata
+from ..core.permissions import AccountPermissions, BasePermissionEnum
 from ..core.utils.json_serializer import CustomJsonEncoder
 from . import CustomerEvents
 from .validators import validate_possible_number
@@ -74,6 +76,8 @@ class Address(models.Model):
         return self.full_name
 
     def __eq__(self, other):
+        if not isinstance(other, Address):
+            return False
         return self.as_data() == other.as_data()
 
     __hash__ = models.Model.__hash__
@@ -150,16 +154,10 @@ class User(PermissionsMixin, ModelWithMetadata, AbstractBaseUser):
     objects = UserManager()
 
     class Meta:
+        ordering = ("email",)
         permissions = (
-            (
-                "manage_users",
-                pgettext_lazy("Permission description", "Manage customers."),
-            ),
-            ("manage_staff", pgettext_lazy("Permission description", "Manage staff.")),
-            (
-                "impersonate_users",
-                pgettext_lazy("Permission description", "Impersonate customers."),
-            ),
+            (AccountPermissions.MANAGE_USERS.codename, "Manage customers."),
+            (AccountPermissions.MANAGE_STAFF.codename, "Manage staff."),
         )
 
     def get_full_name(self):
@@ -175,11 +173,10 @@ class User(PermissionsMixin, ModelWithMetadata, AbstractBaseUser):
     def get_short_name(self):
         return self.email
 
-    def get_ajax_label(self):
-        address = self.default_billing_address
-        if address:
-            return "%s %s (%s)" % (address.first_name, address.last_name, self.email)
-        return self.email
+    def has_perm(self, perm: Union[BasePermissionEnum, str], obj=None):  # type: ignore
+        # This method is overridden to accept perm as BasePermissionEnum
+        perm_value = perm.value if hasattr(perm, "value") else perm  # type: ignore
+        return super().has_perm(perm_value, obj)
 
 
 class CustomerNote(models.Model):
@@ -218,3 +215,21 @@ class CustomerEvent(models.Model):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(type={self.type!r}, user={self.user!r})"
+
+
+class StaffNotificationRecipient(models.Model):
+    user = models.OneToOneField(
+        User,
+        related_name="staff_notification",
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+    )
+    staff_email = models.EmailField(unique=True, blank=True, null=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("staff_email",)
+
+    def get_email(self):
+        return self.user.email if self.user else self.staff_email
